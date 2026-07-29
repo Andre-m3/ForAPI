@@ -1,0 +1,1 @@
+"""Database package: async SQLite initialization and CRUD operations."""

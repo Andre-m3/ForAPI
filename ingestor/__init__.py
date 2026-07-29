@@ -1,0 +1,1 @@
+"""Ingestor package: SignalR WebSocket connection and data ingestion logic."""
