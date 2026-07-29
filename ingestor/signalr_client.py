@@ -510,6 +510,57 @@ class SignalRClient:
         self.running = False
         await self._cleanup()
 
+    async def run_with_reconnect(
+        self,
+        max_retries: int = 5,
+        retry_delay: float = 5.0,
+    ) -> None:
+        """Run the full ingestion lifecycle with automatic reconnection.
+
+        On connection drops, stream errors, or unexpected disconnects, the
+        client cleans up and retries up to ``max_retries`` times, waiting
+        ``retry_delay`` seconds between attempts.  All events are logged.
+
+        Raises:
+            asyncio.CancelledError: If the task is cancelled (graceful shutdown).
+        """
+        retry_count: int = 0
+        try:
+            while True:
+                try:
+                    await self.connect()
+                    await self.listen()
+                    # listen() returned gracefully — stream ended, reset retries.
+                    logger.info(
+                        "SignalR stream ended. Reconnecting in %.1fs...",
+                        retry_delay,
+                    )
+                    retry_count = 0
+                    await asyncio.sleep(retry_delay)
+                except asyncio.CancelledError:
+                    logger.info("Ingestion loop cancelled — shutting down.")
+                    raise
+                except Exception as exc:
+                    retry_count += 1
+                    logger.warning(
+                        "SignalR connection lost: %s. "
+                        "Reconnect attempt %d/%d in %.1fs",
+                        exc, retry_count, max_retries, retry_delay,
+                    )
+                    if retry_count >= max_retries:
+                        logger.error(
+                            "Max reconnection attempts (%d) reached. "
+                            "Stopping ingestion.",
+                            max_retries,
+                        )
+                        return
+                    await asyncio.sleep(retry_delay)
+                finally:
+                    await self._cleanup()
+        except asyncio.CancelledError:
+            await self._cleanup()
+            raise
+
     async def _cleanup(self) -> None:
         """Close WebSocket and session resources."""
         if self.ws is not None and not self.ws.closed:
@@ -541,9 +592,8 @@ async def main() -> None:
 
     client: SignalRClient = SignalRClient()
     try:
-        await client.connect()
-        await client.listen()
-    except KeyboardInterrupt:
+        await client.run_with_reconnect()
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
         await client.disconnect()
