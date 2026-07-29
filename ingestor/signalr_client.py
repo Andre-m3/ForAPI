@@ -6,11 +6,11 @@ Implements the complete connection lifecycle:
   2. WebSocket upgrade with the correct headers (User-Agent, Origin, etc.).
   3. SignalR handshake (protocol version 1.5 / JSON).
   4. Subscription to the ``Streaming`` hub for standard F1 channels.
-  5. Continuous message loop with decompression and in-memory state updates.
+  5. Continuous message loop with decompression, in-memory state updates,
+     and **full Data Lake persistence** to SQLite.
 
-The F1 Live Timing SignalR endpoint uses the older ASP.NET SignalR protocol
-(not the newer ASP.NET Core SignalR), so the negotiation and message framing
-follow that specification.
+All channel data is stored — high-frequency telemetry (CarData, Position) goes
+through the async BatchWriter, while low-frequency data is written directly.
 """
 
 from __future__ import annotations
@@ -18,10 +18,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Final
 
 import aiohttp
 
+from db import database
 from utils.decoder import decode_json
 from utils.state_manager import state
 
@@ -97,12 +99,7 @@ class SignalRClient:
     # ------------------------------------------------------------------
 
     async def _negotiate(self) -> str:
-        """Perform the HTTP negotiation phase and return the connection token.
-
-        Sends a POST to ``/negotiate`` with the required query parameters and
-        headers.  The F1 endpoint responds with a JSON body containing the
-        ``ConnectionToken``.
-        """
+        """Perform the HTTP negotiation phase and return the connection token."""
         negotiate_url: str = f"{self.hub_url}/negotiate"
         params: dict[str, str] = {
             "connectionData": json.dumps([{"Name": "Streaming"}]),
@@ -223,42 +220,243 @@ class SignalRClient:
                 if not channel:
                     continue
 
-                # Decompress and store the data.
+                # Decompress, store in memory, and persist to DB.
                 await self._process_channel_update(channel, data_field)
 
     async def _process_channel_update(self, channel: str, data: Any) -> None:
-        """Decode (if needed) and store a channel update in the state manager."""
+        """Decode, store in memory, and persist to DB a channel update."""
         try:
+            decoded: Any = None
+
+            # --- Decompress if needed ---
             if isinstance(data, str) and data:
-                # Channel data is Base64 + zlib compressed.
                 if channel.endswith(".z"):
-                    # Compressed channels (CarData.z, Position.z).
-                    decoded: dict[str, Any] | list[Any] | None = decode_json(data)
-                    base_channel: str = channel[:-2]  # Remove ".z" suffix.
-                    if decoded is not None:
-                        await state.set(base_channel, decoded)
-                        logger.debug("Updated state: %s (%d bytes decoded)", base_channel, len(data))
+                    decoded = decode_json(data)
+                    base_channel: str = channel[:-2]
                 else:
-                    # Some channels send plain JSON strings, others send compressed.
                     try:
                         decoded = json.loads(data)
                     except (json.JSONDecodeError, TypeError):
                         decoded = decode_json(data)
-
-                    if decoded is not None:
-                        if isinstance(decoded, dict):
-                            await state.update(channel, decoded)
-                        else:
-                            await state.set(channel, decoded)
-                        logger.debug("Updated state: %s", channel)
+                    base_channel = channel
             elif isinstance(data, dict):
-                await state.update(channel, data)
-                logger.debug("Updated state: %s (raw dict)", channel)
+                decoded = data
+                base_channel = channel
+            else:
+                return
+
+            if decoded is None:
+                return
+
+            # --- Update in-memory state ---
+            if isinstance(decoded, dict):
+                if channel.endswith(".z"):
+                    await state.set(base_channel, decoded)
+                else:
+                    await state.update(base_channel, decoded)
+            else:
+                await state.set(base_channel, decoded)
+
+            # --- Persist to Data Lake (SQLite) ---
+            await self._persist_to_db(base_channel, decoded)
+
         except Exception as exc:
             logger.warning("Failed to process channel '%s': %s", channel, exc)
 
     # ------------------------------------------------------------------
-    # 5. Public API
+    # 5. Data Lake persistence
+    # ------------------------------------------------------------------
+
+    async def _persist_to_db(self, channel: str, data: Any) -> None:
+        """Route decoded data to the appropriate DB persistence method.
+
+        High-frequency channels (CarData, Position) are enqueued to the
+        BatchWriter. All other channels are written directly via async
+        aiosqlite calls.
+        """
+        try:
+            if channel == "CarData":
+                self._persist_car_data(data)
+            elif channel == "Position":
+                self._persist_position_data(data)
+            elif channel == "TimingData":
+                await self._persist_timing_data(data)
+            elif channel == "TimingStats":
+                await self._persist_timing_stats(data)
+            elif channel == "TimingAppData":
+                await self._persist_timing_app_data(data)
+            elif channel == "DriverList":
+                await self._persist_driver_list(data)
+            elif channel == "SessionInfo":
+                await database.upsert_session_info(data)
+            elif channel == "SessionStatus":
+                await self._persist_session_status(data)
+            elif channel == "WeatherData":
+                await database.insert_weather(data)
+            elif channel == "RaceControlMessages":
+                await self._persist_race_control(data)
+            elif channel == "TeamRadio":
+                await self._persist_team_radio(data)
+            elif channel == "TopThree":
+                await database.insert_top_three(data)
+            elif channel == "LapCount":
+                await self._persist_lap_count(data)
+            elif channel == "ExtrapolatedClock":
+                await database.insert_extrapolated_clock(data)
+            elif channel == "Heartbeat":
+                # Heartbeat is just a keepalive; no DB persistence needed.
+                pass
+            else:
+                logger.debug("Unknown channel '%s' — not persisted to DB.", channel)
+        except Exception as exc:
+            logger.warning("DB persistence failed for channel '%s': %s", channel, exc)
+
+    def _persist_car_data(self, data: Any) -> None:
+        """Enqueue CarData entries to the batch writer (non-blocking)."""
+        if not isinstance(data, dict):
+            return
+        entries: dict[str, Any] = data.get("Entries", {})
+        ts: float = time.time()
+        for driver_number, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            channels: dict[str, Any] = entry.get("Channels", {})
+            database.batch_writer.enqueue_car_data(ts, str(driver_number), channels)
+
+    def _persist_position_data(self, data: Any) -> None:
+        """Enqueue Position entries to the batch writer (non-blocking)."""
+        if not isinstance(data, dict):
+            return
+        entries: dict[str, Any] = data.get("Entries", {})
+        for ts_str, drivers in entries.items():
+            if not isinstance(drivers, dict):
+                continue
+            try:
+                ts: float = float(ts_str)
+            except (ValueError, TypeError):
+                ts = time.time()
+            for driver_number, pos in drivers.items():
+                if not isinstance(pos, dict):
+                    continue
+                database.batch_writer.enqueue_position(ts, str(driver_number), pos)
+
+    async def _persist_timing_data(self, data: Any) -> None:
+        """Persist TimingData — extract lap times and upsert per driver/lap."""
+        if not isinstance(data, dict):
+            return
+        lines: dict[str, Any] = data.get("Lines", {})
+        for driver_number, line in lines.items():
+            if not isinstance(line, dict):
+                continue
+            lap_number: int | None = line.get("NumberOfLaps")
+            if lap_number is None:
+                continue
+            # Extract sector times.
+            sectors: dict[str, Any] = line.get("Sectors", {})
+            s1: float | None = None
+            s2: float | None = None
+            s3: float | None = None
+            if isinstance(sectors, dict):
+                s1_data: Any = sectors.get("0", {})
+                s2_data: Any = sectors.get("1", {})
+                s3_data: Any = sectors.get("2", {})
+                s1 = self._extract_time(s1_data)
+                s2 = self._extract_time(s2_data)
+                s3 = self._extract_time(s3_data)
+            # Extract total lap time.
+            last_lap: Any = line.get("LastLapTime", {})
+            total_time: float | None = self._extract_time(last_lap)
+            position: int | None = line.get("Position")
+            await database.upsert_lap_time(
+                driver_id=str(driver_number),
+                lap_number=lap_number,
+                sector_1=s1,
+                sector_2=s2,
+                sector_3=s3,
+                total_time=total_time,
+                position=position,
+            )
+
+    @staticmethod
+    def _extract_time(sector_data: Any) -> float | None:
+        """Extract a numeric time value from a sector/lap time dict."""
+        if not isinstance(sector_data, dict):
+            return None
+        value: Any = sector_data.get("Value")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+    async def _persist_timing_stats(self, data: Any) -> None:
+        """Persist TimingStats — store raw JSON per driver."""
+        if not isinstance(data, dict):
+            return
+        lines: dict[str, Any] = data.get("Lines", {})
+        for driver_number, line in lines.items():
+            await database.upsert_timing_stats(str(driver_number), json.dumps(line))
+
+    async def _persist_timing_app_data(self, data: Any) -> None:
+        """Persist TimingAppData — store raw JSON per driver."""
+        if not isinstance(data, dict):
+            return
+        lines: dict[str, Any] = data.get("Lines", {})
+        for driver_number, line in lines.items():
+            await database.upsert_timing_app_data(str(driver_number), json.dumps(line))
+
+    async def _persist_driver_list(self, data: Any) -> None:
+        """Persist DriverList — upsert each driver."""
+        if not isinstance(data, dict):
+            return
+        drivers: dict[str, Any] = data.get("Drivers", data)
+        for driver_number, driver_info in drivers.items():
+            if not isinstance(driver_info, dict):
+                continue
+            driver_info.setdefault("RacingNumber", driver_number)
+            await database.upsert_driver(driver_info)
+
+    async def _persist_session_status(self, data: Any) -> None:
+        """Persist SessionStatus."""
+        if not isinstance(data, dict):
+            return
+        status: str | None = data.get("Status")
+        session_part: int | None = data.get("SessionPart")
+        if status is not None:
+            await database.insert_session_status(status, session_part)
+
+    async def _persist_race_control(self, data: Any) -> None:
+        """Persist RaceControlMessages — upsert each message."""
+        if not isinstance(data, dict):
+            return
+        messages: dict[str, Any] = data.get("Messages", {})
+        for key, msg in messages.items():
+            if not isinstance(msg, dict):
+                continue
+            await database.upsert_race_control_message(str(key), msg)
+
+    async def _persist_team_radio(self, data: Any) -> None:
+        """Persist TeamRadio — upsert each capture."""
+        if not isinstance(data, dict):
+            return
+        captures: dict[str, Any] = data.get("Captures", {})
+        for key, entry in captures.items():
+            if not isinstance(entry, dict):
+                continue
+            await database.upsert_team_radio(str(key), entry)
+
+    async def _persist_lap_count(self, data: Any) -> None:
+        """Persist LapCount."""
+        if not isinstance(data, dict):
+            return
+        current_lap: int | None = data.get("CurrentLap")
+        total_laps: int | None = data.get("TotalLaps")
+        if current_lap is not None and total_laps is not None:
+            await database.insert_lap_count(current_lap, total_laps)
+
+    # ------------------------------------------------------------------
+    # 6. Public API
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
@@ -290,7 +488,6 @@ class SignalRClient:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     await self._handle_message(msg.data)
                 elif msg.type == aiohttp.WSMsgType.BINARY:
-                    # Binary messages are less common but handle them.
                     try:
                         text: str = msg.data.decode("utf-8")
                         await self._handle_message(text)
@@ -338,6 +535,10 @@ async def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    # Initialize DB and batch writer for standalone mode.
+    await database.init_db()
+    await database.batch_writer.start()
+
     client: SignalRClient = SignalRClient()
     try:
         await client.connect()
@@ -346,6 +547,7 @@ async def main() -> None:
         pass
     finally:
         await client.disconnect()
+        await database.batch_writer.stop()
 
 
 if __name__ == "__main__":

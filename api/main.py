@@ -1,8 +1,10 @@
 """
-FastAPI application entry point for the F1 Real-Time API.
+FastAPI application entry point for the F1 Real-Time Data Lake API.
 
 Exposes clean, fast REST endpoints (JSON) for the GPHub mobile client to consume.
-On startup, initializes the SQLite database for persistent session storage.
+On startup, initializes the SQLite database (WAL mode, Data Lake schema) and
+starts the async batch writer for high-frequency telemetry. On shutdown, the
+batch writer is flushed and stopped gracefully.
 """
 
 from __future__ import annotations
@@ -12,7 +14,8 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
-from db.database import init_db
+from db.database import init_db, batch_writer
+from api.routers import telemetry, timing, session
 
 
 # ---------------------------------------------------------------------------
@@ -21,9 +24,11 @@ from db.database import init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan: initialize the SQLite DB on startup."""
+    """Application lifespan: initialize DB and start batch writer on startup."""
     await init_db()
+    await batch_writer.start()
     yield
+    await batch_writer.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -31,19 +36,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 
 app: FastAPI = FastAPI(
-    title="F1 Real-Time API",
+    title="F1 Real-Time Data Lake API",
     description="Self-hosted backend for the GPHub mobile client. "
-    "Ingests official F1 telemetry/timing data and serves it via REST.",
-    version="0.1.0",
+    "Ingests ALL official F1 telemetry/timing data and serves it via REST.",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
+# Register routers
+app.include_router(telemetry.router)
+app.include_router(timing.router)
+app.include_router(session.router)
+
 
 # ---------------------------------------------------------------------------
-# Routes
+# Root health check
 # ---------------------------------------------------------------------------
 
 @app.get("/")
 async def health_check() -> dict[str, str]:
     """Health check endpoint for uptime monitoring and client connectivity tests."""
-    return {"status": "ok", "service": "f1-realtime-api", "version": "0.1.0"}
+    return {"status": "ok", "service": "f1-realtime-datalake-api", "version": "0.2.0"}
