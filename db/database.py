@@ -22,7 +22,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import aiosqlite
 
@@ -378,6 +378,8 @@ async def upsert_race_control_message(key: str, msg: dict[str, Any]) -> None:
          time, post_session, raw_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
+    post_session_raw: Any = msg.get("PostSession")
+    post_session: int | None = int(post_session_raw) if post_session_raw is not None else None
     params: tuple[Any, ...] = (
         key,
         msg.get("Utc"),
@@ -395,7 +397,7 @@ async def upsert_race_control_message(key: str, msg: dict[str, Any]) -> None:
         msg.get("PenaltyType"),
         msg.get("PenaltyCode"),
         msg.get("Time"),
-        int(msg.get("PostSession")) if msg.get("PostSession") is not None else None,
+        post_session,
         json.dumps(msg),
     )
     async with aiosqlite.connect(DB_PATH) as db:
@@ -481,15 +483,19 @@ async def insert_lap_count(current_lap: int, total_laps: int) -> None:
 
 async def insert_extrapolated_clock(data: dict[str, Any]) -> None:
     """Insert an extrapolated clock snapshot."""
+    extrapolating_raw: Any = data.get("ExtrapolatingClock")
+    stopped_raw: Any = data.get("Stopped")
+    extrapolating: int | None = int(extrapolating_raw) if extrapolating_raw is not None else None
+    stopped: int | None = int(stopped_raw) if stopped_raw is not None else None
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO extrapolated_clock
             (extrapolating, remaining, stopped, base)
             VALUES (?, ?, ?, ?)""",
             (
-                int(data.get("ExtrapolatingClock")) if data.get("ExtrapolatingClock") is not None else None,
+                extrapolating,
                 data.get("Remaining"),
-                int(data.get("Stopped")) if data.get("Stopped") is not None else None,
+                stopped,
                 data.get("Base"),
             ),
         )

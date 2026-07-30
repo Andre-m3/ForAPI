@@ -525,41 +525,37 @@ class SignalRClient:
             asyncio.CancelledError: If the task is cancelled (graceful shutdown).
         """
         retry_count: int = 0
-        try:
-            while True:
-                try:
-                    await self.connect()
-                    await self.listen()
-                    # listen() returned gracefully — stream ended, reset retries.
-                    logger.info(
-                        "SignalR stream ended. Reconnecting in %.1fs...",
-                        retry_delay,
+        while True:
+            try:
+                await self.connect()
+                await self.listen()
+                # listen() returned gracefully — stream ended, reset retries.
+                logger.info(
+                    "SignalR stream ended. Reconnecting in %.1fs...",
+                    retry_delay,
+                )
+                retry_count = 0
+                await asyncio.sleep(retry_delay)
+            except asyncio.CancelledError:
+                logger.info("Ingestion loop cancelled — shutting down.")
+                raise
+            except Exception as exc:
+                retry_count += 1
+                logger.warning(
+                    "SignalR connection lost: %s. "
+                    "Reconnect attempt %d/%d in %.1fs",
+                    exc, retry_count, max_retries, retry_delay,
+                )
+                if retry_count >= max_retries:
+                    logger.error(
+                        "Max reconnection attempts (%d) reached. "
+                        "Stopping ingestion.",
+                        max_retries,
                     )
-                    retry_count = 0
-                    await asyncio.sleep(retry_delay)
-                except asyncio.CancelledError:
-                    logger.info("Ingestion loop cancelled — shutting down.")
-                    raise
-                except Exception as exc:
-                    retry_count += 1
-                    logger.warning(
-                        "SignalR connection lost: %s. "
-                        "Reconnect attempt %d/%d in %.1fs",
-                        exc, retry_count, max_retries, retry_delay,
-                    )
-                    if retry_count >= max_retries:
-                        logger.error(
-                            "Max reconnection attempts (%d) reached. "
-                            "Stopping ingestion.",
-                            max_retries,
-                        )
-                        return
-                    await asyncio.sleep(retry_delay)
-                finally:
-                    await self._cleanup()
-        except asyncio.CancelledError:
-            await self._cleanup()
-            raise
+                    return
+                await asyncio.sleep(retry_delay)
+            finally:
+                await self._cleanup()
 
     async def _cleanup(self) -> None:
         """Close WebSocket and session resources."""
