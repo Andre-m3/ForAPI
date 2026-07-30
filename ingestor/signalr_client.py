@@ -54,12 +54,21 @@ DEFAULT_CHANNELS: Final[list[str]] = [
     "WeatherData",
 ]
 
-# Headers required to avoid 403 Forbidden from the F1 servers.
+# Base URL for the F1 live timing page (used for cookie prefetch).
+LIVE_TIMING_BASE_URL: Final[str] = "https://livetiming.formula1.com/"
+
+# Modern browser-like headers required to bypass F1 anti-scraping protections.
+# F1's edge (Cloudflare) rejects the old "BestHTTP" User-Agent with 401/403.
 DEFAULT_HEADERS: Final[dict[str, str]] = {
-    "User-Agent": "BestHTTP",
-    "Accept": "application/json",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
     "Origin": "https://livetiming.formula1.com",
-    "Host": "livetiming.formula1.com",
+    "Referer": "https://livetiming.formula1.com/",
 }
 
 # SignalR protocol version used by the F1 endpoint.
@@ -95,8 +104,34 @@ class SignalRClient:
         self.channels: list[str] = channels if channels is not None else list(DEFAULT_CHANNELS)
 
     # ------------------------------------------------------------------
-    # 1. Negotiation
+    # 1. Cookie prefetch & Negotiation
     # ------------------------------------------------------------------
+
+    async def _prefetch_cookies(self) -> None:
+        """GET the F1 live timing page to obtain required cookies.
+
+        F1's edge layer (Cloudflare) issues session cookies and anti-bot
+        clearance tokens on the first page load.  Without this prefetch,
+        the ``/negotiate`` POST receives a 401 Unauthorized because the
+        request lacks the expected cookies.  The aiohttp ``ClientSession``
+        automatically stores and re-sends cookies via its built-in cookie jar.
+        """
+        assert self.session is not None, "Session must be created first."
+
+        logger.info("Prefetching cookies from %s", LIVE_TIMING_BASE_URL)
+        try:
+            async with self.session.get(
+                LIVE_TIMING_BASE_URL,
+                headers=DEFAULT_HEADERS,
+                allow_redirects=True,
+            ) as resp:
+                logger.info(
+                    "Cookie prefetch complete (HTTP %d, %d cookies stored).",
+                    resp.status,
+                    len(self.session.cookie_jar),
+                )
+        except Exception as exc:
+            logger.warning("Cookie prefetch failed (continuing anyway): %s", exc)
 
     async def _negotiate(self) -> str:
         """Perform the HTTP negotiation phase and return the connection token."""
@@ -468,6 +503,8 @@ class SignalRClient:
         self.session = aiohttp.ClientSession()
 
         try:
+            # Prefetch cookies to bypass F1/Cloudflare anti-scraping (401 fix).
+            await self._prefetch_cookies()
             self.connection_token = await self._negotiate()
             await self._connect_websocket()
             await self._send_handshake()

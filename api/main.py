@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
 
 from db.database import init_db, batch_writer
 from ingestor.signalr_client import SignalRClient
@@ -101,13 +103,22 @@ app.include_router(session.router)
 
 
 # ---------------------------------------------------------------------------
-# Favicon (silence 404 log clutter from browsers)
+# Static assets
 # ---------------------------------------------------------------------------
 
+STATIC_DIR: Path = Path(__file__).resolve().parent.parent / "static"
+FAVICON_PATH: Path = STATIC_DIR / "favicon.ico"
+
+
 @app.get("/favicon.ico", include_in_schema=False)
-async def favicon() -> Response:
-    """Return 204 No Content to silence browser favicon 404 requests."""
-    return Response(status_code=204)
+async def favicon() -> FileResponse:
+    """Serve the real favicon from the ``static/`` directory.
+
+    If the file is missing, FastAPI will return a 404 — this is acceptable
+    during development.  In production, place a valid ``favicon.ico`` in
+    ``static/``.
+    """
+    return FileResponse(FAVICON_PATH, media_type="image/x-icon")
 
 
 # ---------------------------------------------------------------------------

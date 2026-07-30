@@ -3,3 +3,7 @@ uvicorn[standard]
 aiohttp
 aiosqlite
 pydantic
+
+# Testing
+pytest
+httpx
