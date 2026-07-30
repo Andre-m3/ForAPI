@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# F1 Real-Time Data Lake API — Docker Compose
+# ---------------------------------------------------------------------------
+# Builds the API image and maps a persistent volume for the SQLite database
+# so historical F1 data survives container restarts.
+# ---------------------------------------------------------------------------
+
+services:
+  api:
+    build: .
+    container_name: f1-datalake-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Tell the application where to store the SQLite database.
+      # This path matches the volume mount below.
+      - DATA_DIR=/app/data
+    volumes:
+      # Persistent storage for the SQLite database file.
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

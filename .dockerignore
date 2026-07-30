@@ -1,0 +1,43 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+
+# Local SQLite databases — never bake them into the image
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# Tests — not needed in the production image
+tests/
+
+# Git
+.git/
+.gitignore
+
+# IDE / Editor config
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Documentation / notes not required at runtime
+docs/
+notes.md
+glmContext.md
+.clinerules
+
+# Docker meta files
+Dockerfile
+docker-compose.yml
+.dockerignore

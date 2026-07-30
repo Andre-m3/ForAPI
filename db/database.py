@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DB_NAME: str = "f1_season.db"
-DB_PATH: Path = Path(__file__).resolve().parent.parent / DB_NAME
+
+# The database directory can be overridden via the DATA_DIR environment
+# variable. This is essential for Docker deployments where the SQLite file
+# must live inside a persistent volume (e.g. /app/data). When running locally
+# without the env var, it defaults to a `data/` directory at the project root.
+_DEFAULT_DATA_DIR: Path = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR: Path = Path(os.environ.get("DATA_DIR", _DEFAULT_DATA_DIR))
+DB_PATH: Path = DATA_DIR / DB_NAME
 
 # Batch writer flush interval (seconds) and max batch size.
 FLUSH_INTERVAL_SEC: float = 2.0
@@ -244,6 +252,8 @@ CREATE INDEX IF NOT EXISTS idx_weather_created ON weather_data(created_at);
 
 async def init_db() -> None:
     """Initialize the SQLite database with WAL mode and all Data Lake tables."""
+    # Ensure the data directory exists (needed for Docker volume mounts).
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(_PRAGMA_WAL)
         await db.execute(_PRAGMA_SYNC)

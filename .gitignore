@@ -10,8 +10,14 @@ env/
 
 # Databases
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.sqlite3
 f1_season.db
+
+# Persistent data directory (SQLite database lives here)
+data/
 
 # Environment variables & Secrets
 .env

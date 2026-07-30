@@ -146,7 +146,62 @@ uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 4
 
 The server starts at `http://localhost:8000`. The SignalR ingestion client launches automatically in the background — no separate process is needed.
 
-### 2.4 Running the Ingestion Pipeline Standalone
+> **Database location:** The SQLite database is stored in a `data/` directory
+> at the project root by default. This can be overridden with the `DATA_DIR`
+> environment variable (used by the Docker setup below).
+
+### 2.4 Docker Deployment (Recommended for Production)
+
+The project ships with a production-ready `Dockerfile` and `docker-compose.yml`
+for containerized deployment.
+
+#### 2.4.1 Using Docker Compose (easiest)
+
+```bash
+# Build and start the container in detached mode
+docker compose up -d --build
+
+# View logs
+docker compose logs -f
+
+# Stop the container
+docker compose down
+```
+
+The API will be available at `http://localhost:8000`.
+
+**Persistent data:** The `docker-compose.yml` maps `./data` on the host to
+`/app/data` inside the container. The SQLite database (`f1_season.db`) is
+written there, so historical F1 data persists across container restarts.
+
+#### 2.4.2 Using Docker directly
+
+```bash
+# Build the image
+docker build -t f1-datalake-api .
+
+# Run the container with a persistent volume
+docker run -d \
+  --name f1-datalake-api \
+  -p 8000:8000 \
+  -v "$(pwd)/data:/app/data" \
+  -e DATA_DIR=/app/data \
+  f1-datalake-api
+```
+
+#### 2.4.3 Cloud Deployment (Render / Railway / VPS)
+
+The included Dockerfile is compatible with any cloud provider that supports
+Docker:
+
+- **Render / Railway:** Create a new service from this repository. The
+  detected Dockerfile will be used automatically. Set the `DATA_DIR`
+  environment variable to a persistent disk path (e.g. `/var/data`) and attach
+  a persistent disk to that path.
+- **VPS:** Use the `docker run` command above, or deploy with
+  `docker compose up -d`. Ensure the `./data` directory is backed up.
+
+### 2.5 Running the Ingestion Pipeline Standalone
 
 If you want to run *only* the data ingestion (without the REST API) for testing:
 
@@ -154,7 +209,7 @@ If you want to run *only* the data ingestion (without the REST API) for testing:
 python -m ingestor.signalr_client
 ```
 
-### 2.5 Interactive API Documentation
+### 2.6 Interactive API Documentation
 
 FastAPI auto-generates interactive docs:
 
@@ -430,6 +485,10 @@ ForAPI/
 │   └── state_manager.py     # In-memory async state with deep-merge
 ├── docs/
 │   └── README.md            # This file
+├── data/                    # SQLite database directory (persistent, git-ignored)
 ├── requirements.txt
+├── Dockerfile               # Production container image definition
+├── docker-compose.yml       # Container orchestration with persistent volume
+├── .dockerignore            # Files excluded from the Docker build context
 ├── glmContext.md
 └── notes.md
