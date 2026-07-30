@@ -428,8 +428,5 @@ ForAPI/
 ├── utils/
 │   ├── decoder.py           # Base64 + zlib decompression
 │   └── state_manager.py     # In-memory async state with deep-merge
-├── docs/
-│   └── README.md            # This file
-├── requirements.txt
-├── glmContext.md
-└── notes.md
+├──  requirements.txt
+└──  README.md            # This file
