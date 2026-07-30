@@ -32,7 +32,6 @@ tests/
 *.swo
 
 # Documentation / notes not required at runtime
-docs/
 notes.md
 glmContext.md
 .clinerules

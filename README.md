@@ -483,12 +483,13 @@ ForAPI/
 ├── utils/
 │   ├── decoder.py           # Base64 + zlib decompression
 │   └── state_manager.py     # In-memory async state with deep-merge
-├── docs/
-│   └── README.md            # This file
+├── static/
+│   └── favicon.ico          # Served at GET /favicon.ico
 ├── data/                    # SQLite database directory (persistent, git-ignored)
 ├── requirements.txt
 ├── Dockerfile               # Production container image definition
 ├── docker-compose.yml       # Container orchestration with persistent volume
 ├── .dockerignore            # Files excluded from the Docker build context
+├── README.md                # This file
 ├── glmContext.md
 └── notes.md
